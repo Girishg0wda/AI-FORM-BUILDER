@@ -1,0 +1,26 @@
+[
+    {
+        "id": "1782575294.5112305",
+        "formId": "87b5be54-6d92-4d1a-95f4-2b3af86fc223",
+        "timestamp": "2026-06-27 21:18:14",
+        "status": "failed",
+        "error": "Nia API error (401): {\"detail\":\"Invalid API key\"}",
+        "durationMs": 1888
+    },
+    {
+        "id": "1782575308.6308503",
+        "formId": "87b5be54-6d92-4d1a-95f4-2b3af86fc223",
+        "timestamp": "2026-06-27 21:18:28",
+        "status": "failed",
+        "error": "Nia API error (401): {\"detail\":\"Invalid API key\"}",
+        "durationMs": 1323
+    },
+    {
+        "id": "1782575454.4634616",
+        "formId": "87b5be54-6d92-4d1a-95f4-2b3af86fc223",
+        "timestamp": "2026-06-27 21:20:54",
+        "status": "failed",
+        "error": "Nia API error (401): {\"detail\":\"Invalid API key\"}",
+        "durationMs": 3032
+    }
+]

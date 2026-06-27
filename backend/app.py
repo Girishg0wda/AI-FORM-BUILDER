@@ -1,264 +1,126 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import pdfplumber
 import os
-import re
+import json
+import uuid
+import tempfile
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import werkzeug.utils
+from nia_service import robust_extract
+from utils.extractor import get_text_from_file
 
-print("APP LOADED SUCCESSFULLY")
+app = Flask(__name__)
+CORS(app)
 
-app = FastAPI()
+DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+FORMS_FILE = os.path.join(DATA_DIR, 'forms.json')
+SUBMISSIONS_FILE = os.path.join(DATA_DIR, 'submissions.json')
+LOGS_FILE = os.path.join(DATA_DIR, 'logs.json')
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Ensure storage files exist
+os.makedirs(DATA_DIR, exist_ok=True)
+for f in [FORMS_FILE, SUBMISSIONS_FILE, LOGS_FILE]:
+    if not os.path.exists(f):
+        with open(f, 'w') as db:
+            json.dump([], db)
 
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Helper functions to handle JSON "database"
+def read_db(filepath):
+    with open(filepath, 'r') as f:
+        return json.load(f)
 
+def write_db(filepath, data):
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=4)
 
-class ExtractRequest(BaseModel):
-    form_schema: list
-    text: str
+# --- ADMIN & CORE ENDPOINTS ---
 
+@app.route('/api/forms', methods=['POST', 'GET'])
+def manage_user_forms():
+    if request.method == 'POST':
+        form_data = request.json
+        form_data['id'] = str(uuid.uuid4())
+        forms = read_db(FORMS_FILE)
+        forms.append(form_data)
+        write_db(FORMS_FILE, forms)
+        return jsonify({"message": "Form created successfully", "id": form_data['id']}), 201
+    
+    return jsonify(read_db(FORMS_FILE)), 200
 
-def extract_pdf_text(file_path):
-    text = ""
+@app.route('/api/extract', methods=['POST'])
+def extract_data():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    
+    file = request.files['file']
+    form_id = request.form.get('formId')
+    schema_json = request.form.get('schema')
 
+    if not schema_json:
+        return jsonify({"error": "No schema provided"}), 400
+
+    # Create a temporary file to store the uploaded file
+    fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(file.filename)[1])
     try:
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
+        with os.fdopen(fd, 'wb') as tmp:
+            file.save(tmp)
 
-                if page_text:
-                    text += page_text + "\n"
+        schema = json.loads(schema_json)
+        _, extension = os.path.splitext(file.filename)
+        
+        # Extract real text from the file
+        document_text = get_text_from_file(temp_path, extension)
+        
+        if not document_text.strip():
+            return jsonify({"error": "No text could be extracted from the uploaded document."}), 400
 
+        extracted_data = robust_extract(schema, document_text, form_id)
+        
+        return jsonify({"extractedData": extracted_data}), 200
     except Exception as e:
-        print("PDF ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        # Ensure the temporary file is always removed
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
-    return text
+@app.route('/api/admin/metrics', methods=['GET'])
+def get_metrics():
+    # Simple admin dashboard aggregator
+    forms = read_db(FORMS_FILE)
+    submissions = read_db(SUBMISSIONS_FILE)
+    logs = read_db(LOGS_FILE)
+    
+    total_extractions = len(logs)
+    failed_extractions = sum(1 for log in logs if log.get('status') == 'failed')
+    
+    return jsonify({
+        "totalForms": len(forms),
+        "totalSubmissions": len(submissions),
+        "extractionSuccessRate": f"{((total_extractions - failed_extractions) / total_extractions * 100) if total_extractions else 100:.1f}%",
+        "totalLogs": total_extractions
+    }), 200
 
+@app.route('/api/admin/logs', methods=['GET'])
+def get_logs():
+    return jsonify(read_db(LOGS_FILE)), 200
 
-@app.get("/")
-def home():
-    return {
-        "message": "Backend Running"
-    }
+@app.route('/api/submissions', methods=['POST'])
+def create_submission():
+    submission_data = request.json
+    submissions = read_db(SUBMISSIONS_FILE)
+    submission_data['id'] = str(uuid.uuid4())
+    submissions.append(submission_data)
+    write_db(SUBMISSIONS_FILE, submissions)
+    return jsonify({"message": "Submission saved successfully", "id": submission_data['id']}), 201
 
+@app.route('/api/admin/forms/<form_id>', methods=['DELETE'])
+def admin_delete_form(form_id):
+    forms = read_db(FORMS_FILE)
+    updated_forms = [f for f in forms if f.get('id') != form_id]
+    if len(forms) == len(updated_forms):
+        return jsonify({"error": "Form not found"}), 404
+    write_db(FORMS_FILE, updated_forms)
+    return jsonify({"message": "Form deleted by admin"}), 200
 
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-
-    allowed = [
-        "application/pdf",
-        "image/png",
-        "image/jpeg"
-    ]
-
-    if file.content_type not in allowed:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported file type. Only PDF, PNG, JPG, JPEG allowed."
-        )
-
-    filepath = os.path.join(
-        UPLOAD_DIR,
-        file.filename
-    )
-
-    with open(filepath, "wb") as f:
-        f.write(await file.read())
-
-    extracted_text = ""
-
-    if file.content_type == "application/pdf":
-        extracted_text = extract_pdf_text(filepath)
-
-    return {
-        "message": "Uploaded Successfully",
-        "filename": file.filename,
-        "text": extracted_text
-    }
-
-
-@app.post("/extract")
-async def extract_data(data: ExtractRequest):
-
-    text = data.text
-    lines = text.split("\n")
-
-    result = {}
-
-    # NAME
-    name = ""
-
-    if len(lines) > 0:
-        name = lines[0].strip()
-
-    # EMAIL
-    email_match = re.search(
-        r'[\w\.-]+@[\w\.-]+\.\w+',
-        text
-    )
-
-    email = (
-        email_match.group(0)
-        if email_match
-        else ""
-    )
-
-    # PHONE
-
-    phone_match = re.search(
-        r'(\+91[-\s]?\d{10}|\d{10})',
-        text
-    )
-
-    phone = (
-        phone_match.group(0)
-        if phone_match
-        else ""
-    )
-
-    # SKILLS
-    skill_keywords = [
-        "Python",
-        "Java",
-        "JavaScript",
-        "HTML",
-        "CSS",
-        "SQL",
-        "React",
-        "React.js",
-        "Node.js",
-        "Express",
-        "Express.js",
-        "MongoDB",
-        "PostgreSQL",
-        "SQLite",
-        "FastAPI",
-        "Django",
-        "TensorFlow",
-        "Scikit-learn",
-        "Pandas",
-        "NumPy",
-        "Matplotlib",
-        "Git",
-        "GitHub",
-        "Power BI",
-        "Bootstrap",
-        "Spring Boot",
-        "JDBC",
-        "Machine Learning",
-        "Data Analysis",
-        "BeautifulSoup"
-    ]
-
-    found_skills = []
-
-    for skill in skill_keywords:
-
-        if skill.lower() in text.lower():
-            found_skills.append(skill)
-
-    found_skills = list(
-        dict.fromkeys(found_skills)
-    )
-
-    skills = ", ".join(found_skills)
-
-    # EXPERIENCE
-
-    experience_lines = []
-
-    keywords = [
-        "intern",
-        "internship",
-        "developer",
-        "engineer",
-        "analyst"
-    ]
-
-    for line in lines:
-
-        lower = line.lower()
-
-        if any(
-            word in lower
-            for word in keywords
-        ):
-
-            cleaned = line.strip()
-
-            if len(cleaned) > 5:
-                experience_lines.append(
-                    cleaned
-                )
-
-    experience = ", ".join(
-        list(dict.fromkeys(experience_lines[:5]))
-    )
-
-    # DYNAMIC FIELD MAPPING
-
-    for field in data.form_schema:
-
-        label = field.get(
-            "label",
-            ""
-        ).lower()
-
-        original_label = field.get(
-            "label",
-            ""
-        )
-
-        if any(
-            x in label
-            for x in [
-                "name",
-                "candidate",
-                "full name"
-            ]
-        ):
-            result[original_label] = name
-
-        elif any(
-            x in label
-            for x in [
-                "email",
-                "mail"
-            ]
-        ):
-            result[original_label] = email
-
-        elif any(
-            x in label
-            for x in [
-                "phone",
-                "mobile",
-                "contact"
-            ]
-        ):
-            result[original_label] = phone
-
-        elif "skill" in label:
-            result[original_label] = skills
-
-        elif any(
-            x in label
-            for x in [
-                "experience",
-                "internship"
-            ]
-        ):
-            result[original_label] = experience
-
-        else:
-            result[original_label] = ""
-
-    return result
+if __name__ == '__main__':
+    app.run(port=5000, debug=True)
